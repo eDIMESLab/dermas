@@ -78,7 +78,6 @@ matrix:
 before_install:
   - travis_retry eval "${MATRIX_EVAL}"
   #- pip install -r requirements.txt
-  - python -m pip install openslide-python==1.1.1
   - python -m pip install numpy==1.16.2
   - python -m pip install tqdm==4.32.1
   - python -m pip install opencv-python==4.1.0.25

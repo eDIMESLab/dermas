@@ -132,10 +132,12 @@ rule make_annotation:
       cmap[color] = int(encoded)
 
     # Import full SVS large-image
-    osr = OpenSlide(input.svs_filename)
+    # osr = OpenSlide(input.svs_filename)
+    osr = Image.open(input.svs_filename)
 
     # compute max dimension of the image
-    w, h = osr.level_dimensions[0] # max size
+    # w, h = osr.level_dimensions[0] # max size
+    w, h = osr.size
 
     mat = np.zeros(shape=(h, w), dtype='uint8')
 
@@ -185,7 +187,8 @@ rule make_annotation:
     cv2.imwrite(output.ann_filename, mat)
 
     # extract the corresponding ROI in the original image
-    mat = osr.read_region(location=(miny, minx), level=0, size=(maxy - miny, maxx - minx)).convert('RGB')
+    # mat = osr.read_region(location=(miny, minx), level=0, size=(maxy - miny, maxx - minx)).convert('RGB')
+    mat = osr.crop(box=(miny, minx, maxy + miny, maxx + minx)).convert('RGB')
     # pad the original image
     mat = np.pad(mat, ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), mode='constant', constant_values=(0, 0))
     # save it

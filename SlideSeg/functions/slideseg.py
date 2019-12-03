@@ -9,10 +9,12 @@ import os
 import cv2
 import tqdm
 import numpy as np
-from openslide import OpenSlide
+from PIL import Image
+# from openslide import OpenSlide
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
+Image.MAX_IMAGE_PIXELS = 42598083360
 
 __author__ = 'Nico Curti'
 __email__ = 'nico.curti2@unibo.it'
@@ -518,7 +520,8 @@ def openwholeslide (path):
   print('loading {0} ...'.format(filename), end='')
 
   # Open Slide Image
-  osr = OpenSlide(path)
+  # osr = OpenSlide(path)
+  osr = Image.open(path)
 
   print('[done]')
   return osr
@@ -682,7 +685,8 @@ def run (parameters, filename):
 
   # Open slide
   osr = openwholeslide(parameters['slide_path'])
-  size = osr.level_dimensions[0] # max size
+  # size = osr.level_dimensions[0] # max size
+  size = osr.size # max size
 
   # Annotation Mask
   xml_file = filename.replace('svs', 'roi') # .roi become .xml in the new version of Seeden Viewer
@@ -698,8 +702,11 @@ def run (parameters, filename):
   format, suffix = formatcheck(parameters['format'])
 
   # Find chip data/locations to be saved
-  chip_dictionary, image_dict = getchips(osr.level_count, osr.level_dimensions, int(parameters['size']), int(parameters['overlap']),
+  # chip_dictionary, image_dict = getchips(osr.level_count, osr.level_dimensions, int(parameters['size']), int(parameters['overlap']),
+  #                                        mask, annotations, filename, suffix, parameters['save_all'], float(parameters['save_ratio']))
+  chip_dictionary, image_dict = getchips([0], [size], int(parameters['size']), int(parameters['overlap']),
                                          mask, annotations, filename, suffix, parameters['save_all'], float(parameters['save_ratio']))
+
 
   # Save chips and masks
   print('Saving chips... {0} total chips'.format(len(chip_dictionary)))
@@ -707,8 +714,11 @@ def run (parameters, filename):
   for filename, (keys, i, col, row, scale_factor_width, scale_factor_height) in tqdm.tqdm(chip_dictionary.items()):
 
     # load chip region from slide image
-    img = osr.read_region([int(col * scale_factor_width), int(row * scale_factor_height)], i,
-                          [int(parameters['size']), int(parameters['size'])]).convert('RGB')
+    # img = osr.read_region([int(col * scale_factor_width), int(row * scale_factor_height)], i,
+    #                       [int(parameters['size']), int(parameters['size'])]).convert('RGB')
+    img = osr.crop(box=(int(col * scale_factor_width), int(row * scale_factor_height),
+                        int(col * scale_factor_width) + int(parameters['size']),
+                        int(row * scale_factor_height) + int(parameters['size']))).convert('RGB')
 
     # load image mask and curate
     img_mask = mask[int(row * scale_factor_height) : int((row + int(parameters['size'])) * scale_factor_height),
