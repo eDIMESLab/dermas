@@ -30,7 +30,7 @@ The project has been developed in collaboration with the Sant'Orsola Hospital of
 
 ## Installation
 
-First of all ensure that a right Python version is installed (Python >= 3.4 is required). <!-- to check -->
+First of all ensure that a right Python version is installed (Python >= 3.5 is required).
 The [Anaconda/Miniconda](https://www.anaconda.com/) python version is recommended.
 
 Download the project or the latest release:
