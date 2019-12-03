@@ -1,0 +1,10 @@
+setup.py
+SlideSeg/__init__.py
+SlideSeg/__version__.py
+SlideSeg/build.py
+SlideSeg/counting_mask.py
+SlideSeg/create_db.py
+SlideSeg/refine_mask.py
+SlideSeg/splitter.py
+SlideSeg/functions/__init__.py
+SlideSeg/functions/slideseg.py

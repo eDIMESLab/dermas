@@ -1,0 +1,6 @@
+openslide-python>=1.1.1
+numpy>=1.16.2
+tqdm>=4.32.1
+opencv-python>=4.1.0.25
+Pillow>=6.2.0
+snakemake

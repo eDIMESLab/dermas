@@ -1,0 +1,23 @@
+
+n_cpu: '1'
+
+
+NTH_CMAP: 1
+NTH_ANNOTATION: 1
+NTH_PATCHES: 1
+NTH_PATCH_COUNTERS: 1
+
+XML:
+  xml_dir: 'labels'
+  extension: 'roi'
+
+SVS:
+  slide_dir: 'slices'
+  extension: 'svs'
+
+PATCH:
+  patch_dir: 'patches'
+  size: 128
+  stride: 1
+
+

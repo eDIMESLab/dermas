@@ -1,0 +1,299 @@
+# snakemake                             # to run
+# snakemake --force clear               # to force rule
+# snakemake -n                          # check workflow
+# REMEMBER REMEMBER : pipe in powershell wraps the object into utf-16 char set (avoid it...evil!)
+# WIN32 :=  cmd /C "snakemake --dag | dot -Tpdf > workflow.pdf"
+# UNIX  :=  snakemake --dag | dot -Tpdf > workflow.pdf
+
+from __future__ import print_function
+from __future__ import division
+
+
+import os
+import cv2
+import tqdm
+import shutil
+import operator
+import numpy as np
+from glob import glob
+from PIL import Image
+from openslide import OpenSlide
+import xml.etree.ElementTree as ET
+
+
+configfile: 'config.yaml'
+
+local = os.getcwd()
+Image.MAX_IMAGE_PIXELS = 425980833600 # 100 times the default maximum size
+
+svs_dir = os.path.abspath(config['SVS']['slide_dir'])
+svs_ext = config['SVS']['extension']
+
+xml_dir = os.path.abspath(config['XML']['xml_dir'])
+xml_ext = config['XML']['extension']
+
+
+patch_dir    = os.path.abspath(config['PATCH']['patch_dir'])
+patch_size   = int(config['PATCH']['size'])
+patch_stride = int(config['PATCH']['stride']) # overlap between patches
+patch_svs    = '_'.join([patch_dir, config['SVS']['slide_dir']])
+patch_ann    = '_'.join([patch_dir, config['XML']['xml_dir']])
+
+nth_make_colormap   = config['NTH_CMAP']
+nth_make_annotation = config['NTH_ANNOTATION']
+nth_make_patches    = config['NTH_PATCHES']
+nth_make_patche_cnt = config['NTH_PATCH_COUNTERS']
+
+
+xmls = [os.path.splitext(os.path.basename(f))[0] for f in glob(os.path.join(xml_dir, '*.{}'.format(xml_ext)))]
+svss = [os.path.splitext(os.path.basename(f))[0] for f in glob(os.path.join(svs_dir, '*.{}'.format(svs_ext)))]
+ann_dir = os.path.join(os.path.dirname(svs_dir), 'annotation')
+
+# consistency check
+assert sorted(xmls) == sorted(svss)
+
+os.makedirs(os.path.join(patch_svs), exist_ok=True)
+os.makedirs(os.path.join(patch_ann), exist_ok=True)
+os.makedirs(ann_dir,                 exist_ok=True)
+
+
+
+
+
+rule all:
+  input:
+    patches_db = os.path.join(local, 'ann_db.dat'),
+
+
+
+
+
+rule make_colormap:
+  input:
+    xml_filenames = expand(os.path.join(xml_dir, '{xml}.%s'%(xml_ext)), xml=xmls),
+  output:
+    color_map = os.path.join(local, 'cmap.dat'),
+  benchmark:
+    os.path.join('benchmark', 'benchmark_colormap.dat')
+  threads:
+    nth_make_colormap
+  message:
+    'Make global annotation colormap step'
+  run:
+    colors = set()
+
+    for xml in input.xml_filenames:
+
+      tree = ET.parse(xml)
+      root = tree.getroot()
+
+      colors.update((reg.get('color') for reg in root.iter('contour')))
+
+    colors.add('#000000') # manually add black
+    range_color = np.linspace(0, 255, len(colors)).astype(int)
+
+    with open(output.color_map, 'w', encoding='utf-8') as out:
+      # write header
+      out.write('color,encoded\n')
+      for i, c in zip(range_color, colors):
+        out.write('{},{:d}\n'.format(c, i))
+
+
+
+
+
+
+
+rule make_annotation:
+  input:
+    svs_filename = os.path.join(svs_dir, '{svs}.%s'%(svs_ext)),
+    xml_filename = os.path.join(xml_dir, '{svs}.%s'%(xml_ext)),
+    color_map    = os.path.join(local, 'cmap.dat'),
+  output:
+    svs_filename = os.path.join(ann_dir, 'roi_{svs}.png'),
+    ann_filename = os.path.join(ann_dir, 'ann_{svs}.png'),
+  benchmark:
+    os.path.join('benchmark', 'benchmark_annotation_{svs}.dat')
+  threads:
+    nth_make_annotation
+  message:
+    'Make annotation step for {wildcards.svs}.%s'%(svs_ext)
+  run:
+    # load colormap
+    with open(input.color_map, 'r', encoding='utf-8') as fp:
+      rows = fp.read().splitlines()
+
+    # check right fmt
+    assert len(rows[0].split(',')) == 2
+
+    cmap = {}
+    for row in rows[1:]:
+      color, encoded = row.split(',')
+      cmap[color] = int(encoded)
+
+    # Import full SVS large-image
+    osr = OpenSlide(input.svs_filename)
+
+    # compute max dimension of the image
+    w, h = osr.level_dimensions[0] # max size
+
+    mat = np.zeros(shape=(h, w), dtype='uint8')
+
+    annotations = dict()
+
+    # Import xml file and get root
+    tree = ET.parse(input.xml_filename)
+    root = tree.getroot()
+
+    whole_points = []
+
+    # Find data in xml file
+    for reg in root.iter('contour'):
+      key = reg.get('name').upper()
+      color_code = reg.get('color')
+
+      points = [tuple(map(round, eval(vert.text))) for vert in reg.iter('point')]
+
+      cnt = np.asarray(points).reshape((-1, 1, 2)).astype(np.int32)
+
+      cv2.fillPoly(img=mat, pts=[cnt], color=cmap[color_code], lineType=8, shift=0)
+
+      whole_points.extend(points)
+
+    # extract ROI from annotated images
+    minx = min(map(operator.itemgetter(0), whole_points))
+    miny = min(map(operator.itemgetter(1), whole_points))
+    maxx = max(map(operator.itemgetter(0), whole_points))
+    maxy = max(map(operator.itemgetter(1), whole_points))
+
+    # extract the annotated ROI
+    mat = mat[minx : maxx, miny : maxy]
+    # evaluate paddding for the ROI according to the desired size
+    w, h = mat.shape
+    pad_w = max(patch_size - (w % patch_size), 0)
+    pad_h = max(patch_size - (h % patch_size), 0)
+
+    # Number of raws/columns to be added for every directons
+    pad_top    = pad_w >> 1 # bit shift, integer division by two
+    pad_bottom = pad_w - pad_top
+    pad_left   = pad_h >> 1
+    pad_right  = pad_h - pad_left
+
+    # pad the annotated image
+    mat = np.pad(mat, ((pad_left, pad_right), (pad_top, pad_bottom)), mode='constant', constant_values=(0, 0))
+    # save it
+    cv2.imwrite(output.ann_filename, mat)
+
+    # extract the corresponding ROI in the original image
+    mat = osr.read_region(location=(miny, minx), level=0, size=(maxy - miny, maxx - minx)).convert('RGB')
+    # pad the original image
+    mat = np.pad(mat, ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), mode='constant', constant_values=(0, 0))
+    # save it
+    cv2.imwrite(output.svs_filename, mat)
+
+
+
+rule make_patches:
+  input:
+    svs_filename = os.path.join(ann_dir, 'roi_{svs}.png'),
+    ann_filename = os.path.join(ann_dir, 'ann_{svs}.png'),
+    color_map    = os.path.join(local, 'cmap.dat'),
+  output:
+    # patches_svs = dynamic(os.path.join(patch_svs, '{svs}_{patch}.png')),
+    # patches_ann = dynamic(os.path.join(patch_ann, '{svs}_{patch}.png')),
+    patches_cnt = os.path.join(ann_dir, 'ann_{svs}_counter.dat'),
+  benchmark:
+    os.path.join('benchmark', 'benchmark_patch_{svs}.dat')
+  threads:
+    nth_make_patches
+  message:
+    'Make patches step for {wildcards.svs}.%s'%(svs_ext)
+  run:
+    filename = os.path.basename(input.svs_filename)
+    name, ext = os.path.splitext(filename)
+
+    # Import full SVS large-image
+    osr = Image.open(input.svs_filename)
+    osr = np.asarray(osr, dtype=np.uint8)
+    # Import full Annotated large-image
+    ann = Image.open(input.ann_filename)
+    ann = np.asarray(ann, dtype=np.uint8)
+
+    # take size of ONLY the first level
+    width, height, _ = osr.shape
+
+    # load colormap
+    with open(input.color_map, 'r', encoding='utf-8') as fp:
+      rows = fp.read().splitlines()
+
+    # check right fmt
+    assert len(rows[0].split(',')) == 2
+
+    cmap = {}
+    for row in rows[1:]:
+      color, encoded = row.split(',')
+      cmap[int(encoded)] = color
+
+    # start to generate patches
+
+    with open(output.patches_cnt, 'w', encoding='utf-8') as counter:
+      # write header
+      counter.write('Filename,{}\n'.format(','.join([v for _, v in cmap.items()])))
+
+      for col in tqdm.tqdm(range(0, width, patch_size - patch_stride)):
+        for row in tqdm.tqdm(range(0, height, patch_size - patch_stride)):
+
+          svs_patch = osr[row : row + patch_size, col : col + patch_size]
+          ann_patch = ann[row : row + patch_size, col : col + patch_size]
+
+          unique_ann = set(ann_patch.ravel())
+
+          # save only if there is a signal
+          if all(v == 0 for v in unique_ann):
+            continue
+
+          outfile = '{}_{:d}_{:d}.png'.format(name, col, row)
+          patches_svs = os.path.join(patch_svs, outfile)
+          patches_ann = os.path.join(patch_ann, outfile)
+
+          cv2.imwrite(patches_svs, svs_patch)
+          cv2.imwrite(patches_ann, ann_patch)
+
+          # save counter of labels
+          # print on file the corresponding areas as boolean mask
+          tags = ','.join([str(int(k in unique_ann)) for k, _ in cmap.items()])
+
+          assert len(tags) == 7
+
+          # write output
+          counter.write('{},{}\n'.format(outfile, tags))
+
+
+
+
+rule merge_patch_counters:
+  input:
+    patches_cnt = expand(os.path.join(ann_dir, 'ann_{svs}_counter.dat'), svs=svss),
+  output:
+    patches_db = os.path.join(local, 'ann_db.dat'),
+  benchmark:
+    os.path.join('benchmark', 'benchmark_db_patch.dat')
+  threads:
+    nth_make_patche_cnt
+  message:
+    'Make merge patche counters step'
+  run:
+    # concatenate all files into a single db
+
+    # copy the first file just to include the header
+    shutil.copyfile(input.patches_cnt[0], output.patches_db)
+
+    # append all the other files without header
+    for input_file in input.patches_cnt[1:]:
+      with open(input_file, 'r', encoding='utf-8') as fp:
+        rows = fp.read().splitlines()
+
+      # append to the DB file
+      with open(output.patches_db, 'a', encoding='utf-8') as out:
+        for row in rows[1:]:
+          out.write(row + '\n')
