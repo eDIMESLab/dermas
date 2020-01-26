@@ -6,6 +6,12 @@ NTH_CMAP: 1
 NTH_ANNOTATION: 1
 NTH_PATCHES: 1
 NTH_PATCH_COUNTERS: 1
+NTH_MERGE_PATCH_COUNTERS: 1
+NTH_EXTRACT_INTEREST: 1
+
+INTEREST:
+  key: '#0000ff' # blue (aka melanoma in DERMAS project)
+  value: 'melanoma-maligno'
 
 XML:
   xml_dir: 'labels'
@@ -20,4 +26,7 @@ PATCH:
   size: 128
   stride: 1
 
-
+EIGENSLICES:
+  train_perc: .8
+  test_perc: .2
+  n_components: 3

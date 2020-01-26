@@ -13,12 +13,19 @@ import os
 import cv2
 import tqdm
 import shutil
+import pickle
 import operator
 import numpy as np
+import pandas as pd
 from glob import glob
 from PIL import Image
 from openslide import OpenSlide
+from numpy.fft import fft2 as fft
 import xml.etree.ElementTree as ET
+from sklearn.pipeline import make_pipeline, make_union
+from sklearn.decomposition import PCA
+from sklearn.model_selection import LeaveOneGroupOut
+from sklearn.preprocessing import StandardScaler
 
 
 configfile: 'config.yaml'
@@ -39,10 +46,22 @@ patch_stride = int(config['PATCH']['stride']) # overlap between patches
 patch_svs    = '_'.join([patch_dir, config['SVS']['slide_dir']])
 patch_ann    = '_'.join([patch_dir, config['XML']['xml_dir']])
 
-nth_make_colormap   = config['NTH_CMAP']
-nth_make_annotation = config['NTH_ANNOTATION']
-nth_make_patches    = config['NTH_PATCHES']
-nth_make_patche_cnt = config['NTH_PATCH_COUNTERS']
+interest_key   = config['INTEREST']['key']
+interest_value = config['INTEREST']['value']
+
+pca_train_perc = float(config['EIGENSLICES']['train_perc'])
+pca_test_perc  = float(config['EIGENSLICES']['test_perc'])
+pca_ncomp      = int(config['EIGENSLICES']['n_components'])
+
+if pca_train_perc + pca_test_perc != 1.:
+  raise ValueError('Train-Test percentages must be sum to 1 for Eigenslices! Given train:{} test:{}'.format(pca_train_perc, pca_test_perc))
+
+nth_make_colormap        = config['NTH_CMAP']
+nth_make_annotation      = config['NTH_ANNOTATION']
+nth_make_patches         = config['NTH_PATCHES']
+nth_make_patche_cnt      = config['NTH_PATCH_COUNTERS']
+nth_merge_patch_counters = config['NTH_MERGE_PATCH_COUNTERS']
+nth_extract_interest     = config['NTH_EXTRACT_INTEREST']
 
 
 xmls = [os.path.splitext(os.path.basename(f))[0] for f in glob(os.path.join(xml_dir, '*.{}'.format(xml_ext)))]
@@ -141,8 +160,6 @@ rule make_annotation:
 
     mat = np.zeros(shape=(h, w), dtype='uint8')
 
-    annotations = dict()
-
     # Import xml file and get root
     tree = ET.parse(input.xml_filename)
     root = tree.getroot()
@@ -168,10 +185,17 @@ rule make_annotation:
     maxx = max(map(operator.itemgetter(0), whole_points))
     maxy = max(map(operator.itemgetter(1), whole_points))
 
+    # seeden viewer allows to create rois outside the image boundaries!!
+    maxx = np.clip(maxx, 0, w)
+    maxy = np.clip(maxy, 0, h)
+
+    minx = np.clip(minx, 0, w)
+    miny = np.clip(miny, 0, h)
+
     # extract the annotated ROI
-    mat = mat[minx : maxx, miny : maxy]
+    roi = mat[miny : maxy, minx : maxx]
     # evaluate paddding for the ROI according to the desired size
-    w, h = mat.shape
+    w, h = roi.shape
     pad_w = max(patch_size - (w % patch_size), 0)
     pad_h = max(patch_size - (h % patch_size), 0)
 
@@ -182,17 +206,17 @@ rule make_annotation:
     pad_right  = pad_h - pad_left
 
     # pad the annotated image
-    mat = np.pad(mat, ((pad_left, pad_right), (pad_top, pad_bottom)), mode='constant', constant_values=(0, 0))
+    padded = np.pad(roi, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='constant', constant_values=(0, 0))
     # save it
-    cv2.imwrite(output.ann_filename, mat)
+    cv2.imwrite(output.ann_filename, padded)
 
     # extract the corresponding ROI in the original image
     # mat = osr.read_region(location=(miny, minx), level=0, size=(maxy - miny, maxx - minx)).convert('RGB')
-    mat = osr.crop(box=(miny, minx, maxy + miny, maxx + minx)).convert('RGB')
+    roi_original = osr.crop(box=(minx, miny, maxx, maxy)).convert('RGB')
     # pad the original image
-    mat = np.pad(mat, ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), mode='constant', constant_values=(0, 0))
+    padded = np.pad(roi_original, ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), mode='constant', constant_values=(0, 0))
     # save it
-    cv2.imwrite(output.svs_filename, mat)
+    cv2.imwrite(output.svs_filename, padded)
 
 
 
@@ -282,9 +306,9 @@ rule merge_patch_counters:
   benchmark:
     os.path.join('benchmark', 'benchmark_db_patch.dat')
   threads:
-    nth_make_patche_cnt
+    nth_merge_patch_counters
   message:
-    'Make merge patche counters step'
+    'Make merge patch counters step'
   run:
     # concatenate all files into a single db
 
@@ -300,3 +324,72 @@ rule merge_patch_counters:
       with open(output.patches_db, 'a', encoding='utf-8') as out:
         for row in rows[1:]:
           out.write(row + '\n')
+
+
+rule extract_interest:
+  input:
+    patches_db = os.path.join(local, 'ann_db.dat'),
+  output:
+    interest_db = os.path.join(local, 'only_{interest}_db.dat'.format(**{'interest' : interest_value})),
+  benchmark:
+    os.path.join('benchmark', 'benchmark_extract_interest.dat')
+  threads:
+    nth_extract_interest
+  message:
+    'Extracting interest portion of patches DB'
+  run:
+
+    patches_db = pd.read_csv(input.patches_db, sep=',', header=0)
+    colors = set(patches_db.columns) - {'Filename'}
+
+    if not interest_key in colors:
+      raise ValueError('Interest key not found in the CMAP of patches db! Possible keys are {}'.format(', '.join(map(str, colors))))
+
+    query = ' & '.join(("(patches_db['{}'] == 0)".format(k) for k in colors if k != interest_key))
+    query = ' & '.join((query, "(patches_db['{}'] == 1)".format(interest_key)))
+
+    extract = patches_db[eval(query)]
+
+    extract.to_csv(output.interest_db, sep=',', header=True, index=False)
+
+
+rule eigenslices:
+  input:
+    interest_db = os.path.join(local, 'only_{interest}_db.dat'.format(**{'interest' : interest_value})),
+  output:
+    pca_coords = os.path.join(local, 'pca_coords_ncomp{ncomp}_ntrain_{ntrain}.pickle'.format(**{'ncomp' : pca_ncomp, 'ntrain' : pca_train_perc})),
+  benchmark:
+    os.path.join('benchmark', 'benchmark_eigenslices.dat')
+  threads:
+    nth_extract_interest
+  message:
+    'Computing Eigenslices of interest subset'
+  run:
+
+    db = pd.read_csv(input.interest_db, sep=',', header=0)
+    db['svs'] = db['Filename'].str.split('_').str[1]
+    groups = np.asarray(db.svs, dtype=int)
+
+    files = (os.path.join(patch_svs, f) for f in db.Filename)
+    images = np.asarray([cv2.imread(f) for f in files])
+
+    pipe = make_pipeline(StandardScaler(), PCA(n_components=pca_ncomp))
+    logo = LeaveOneGroupOut()
+
+    # TODO: split this loop along available workers (different rules)
+    results = []
+    for train_index, test_index in logo.split(X=images, groups=groups):
+      X_train = images[train_index].reshape(len(train_index), -1)
+      X_test  = images[test_index].reshape(len(test_index), -1)
+
+      X_train = abs(fft(X_train))
+      X_test  = abs(fft(X_test))
+
+      pca_coords = pipe.fit(X_train).transform(X_test)
+      results.append(pca_coords)
+
+    results = np.concatenate(results)
+
+    with open(output.pca_coords, 'wb') as fp:
+      pickle.dump(results, fp, 2)
+
